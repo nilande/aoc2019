@@ -111,7 +111,7 @@ def draw(tiles: dict):
                 case TileType.WALL: set_string += chr(9608) * 3
                 case TileType.BLOCK: set_string += tile_color[(x+y*3)%6+1] + chr(9618) * 3 + tile_color[0]
                 case TileType.PADDLE: set_string += chr(9603) * 3
-                case TileType.BALL: set_string += ' O '
+                case TileType.BALL: set_string += ' ' + chr(11044) + ' '
         set_string += '\n'
 
     print(set_string)

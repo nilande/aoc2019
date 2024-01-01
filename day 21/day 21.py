@@ -1,3 +1,4 @@
+import functools
 from multiprocessing import Process, Pipe
 
 #
@@ -88,86 +89,101 @@ class IntcodeComputer:
 #
 def computer_main(conn):
     """Main function for the process running the computer. Communicating with other processes using a Pipe object"""
-    with open('day 19/input.txt') as file:
+    with open('day 21/input.txt') as file:
         program_string = file.read().strip()
     computer = IntcodeComputer(program_string)
-    computer.expand_memory(100)
+    computer.expand_memory(1000)
     computer.backup()
     while True:
         computer.execute(conn)
+        conn.send(-1) # Send reboot
         computer.restore()
     conn.close()
+
+#
+# Constants
+#
+INSTRUCTIONS = [
+    ['AND', ['A', 'B', 'C', 'D', 'T', 'J'], ['T', 'J']],
+    ['OR', ['A', 'B', 'C', 'D', 'T', 'J'], ['T', 'J']],
+    ['NOT', ['A', 'B', 'C', 'D', 'T', 'J'], ['T', 'J']]
+]
+
+#
+# Helper function
+#
+def readline(conn: Pipe) -> tuple:
+    line = ''
+    char = None
+    while line[-1:] != '\n':
+        char = conn.recv()
+        if not 0 <= char < 256: return line, char
+        line += chr(char)
+    return line[:-1], None
+
+def sendline(conn: Pipe, string: str) -> None:
+    for c in string+'\n': conn.send(ord(c))
+
+@functools.cache
+def get_instruction(number: int) -> str:
+    """Get the text instruction matching a value between 0-35"""
+    i = INSTRUCTIONS[number % 3]
+    number //= 3
+    p1 = number % 6
+    number //= 6
+    p2 = number
+    return f'{i[0]} {i[1][p1]} {i[2][p2]}'
+
+def get_instructions(number: int) -> str:
+    instructions = ''
+    while number > 0:
+        instructions += get_instruction(number % 36) + '\n'
+        number //= 36
+    return instructions
 
 #
 # Main function
 #
 if __name__ == "__main__":
     #
-    # Puzzle 1
+    # Both puzzles
+    #
+    # Puzzle 1 solution:
+    # > NOT C T
+    # > AND D T
+    # > NOT A J
+    # > OR T J
+    # > WALK
+    #
+    # Puzzle 2 solution:
+    # > NOT B J
+    # > AND D J
+    # > NOT C T
+    # > AND D T
+    # > AND H T
+    # > OR T J
+    # > NOT A T
+    # > OR T J
+    # > RUN
     #
     conn, child_conn = Pipe()
     p = Process(target=computer_main, args=(child_conn,))
     p.start()
 
-    acc = 0
-    beam_view = ''
-    for y in range(50):
-        for x in range(50):
-            conn.send(x)
-            conn.send(y)
-            if conn.recv() == 1:
-                beam_view += '#'
-                acc += 1
-                puzzle2_start = (x, y)
-            else:
-                beam_view += '.'
-        beam_view += '\n'
-
-    print(beam_view)
-
-    print(f'Puzzle 1 solution is: {acc}')
-
-    #
-    # Puzzle 2
-    #
-    x, y = puzzle2_start
-    diag_len = 0
-    start_points = []
-    while diag_len < 100:
-        while True: # Move down
-            y += 1
-            conn.send(x)
-            conn.send(y)
-            if conn.recv() == 0: break
-
-        diag_len = 0
-        y -= 1
-        start_points.append((x, y))
-        while True: # Move diagonally up
-            x += 1
-            y -= 1
-            diag_len += 1
-            conn.send(x)
-            conn.send(y)
-            if conn.recv() == 0: break
-        x -= 1
-        y += 1
-
-    # Fine grained search between the last two diagonal searches
-    for x in range(start_points[-2][0], start_points[-1][0]):
-        for y in range(start_points[-2][1], start_points[-1][1]):
-            for i in range(0, 100, 99):
-                conn.send(x+i)
-                conn.send(y-i)
-                if conn.recv() == 0:
-                    break
-            else:
-                y -= 99
+    while True:
+        print(readline(conn)[0])
+        
+        command = ''
+        while command not in ('WALK', 'RUN'):
+            command = input('> ')
+            sendline(conn, command)
+        while True:
+            line, val = readline(conn)
+            print(line)
+            if val is not None:
                 break
-        else: continue
-        break
+        if val != -1:
+            print(f'Puzzle solution is: {val}')
+            break
 
-    print(f'Puzzle 2 solution is: {x*10000 + y} (x={x}, y={y})')
-
-    p.terminate()
-    p.join()
+    p.kill()

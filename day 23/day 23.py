@@ -1,3 +1,4 @@
+import time
 from multiprocessing import Process, Pipe
 
 #
@@ -5,8 +6,13 @@ from multiprocessing import Process, Pipe
 #
 class IntcodeComputer:
     """This is a version of the Intcode computer that expects to be run in a separate process, and communicate using a Pipe"""
-    def __init__(self, program_string: str) -> None:
+    def __init__(self, program_string: str, conn: Pipe, address: int) -> None:
         self.program = list(map(int, program_string.split(',')))
+        self.conn = conn
+        self.send_buffer = []
+        self.recv_buffer = [ address ]
+        self.address = address
+        self.idle_timer = None
 
     def expand_memory(self, size: int) -> None:
         """Enpand the program memory of the computer with 'size' values"""
@@ -34,8 +40,34 @@ class IntcodeComputer:
             case 1: self.program[pos] = val                             # Absolute mode
             case 2: self.program[rel_base + self.program[pos]] = val    # Relative mode
 
-    def execute(self, conn: Pipe) -> None:
-        """Executes the program, with communication with host process happening through Pipe object"""
+    def send(self, data: int) -> None:
+        """Use the computer's Pipe object to send data"""
+        self.idle_timer = None # Reset idle timer
+        self.send_buffer.append(data)
+        if len(self.send_buffer) > 2: # Send data every 3rd instruction
+            self.conn.send(self.send_buffer)
+            self.send_buffer.clear()
+
+    def recv(self) -> int:
+        """Use the computer's Pipe object to receive data"""
+        if len(self.recv_buffer) > 0:
+            self.idle_timer = None # Reset idle timer
+            return self.recv_buffer.pop(0)
+        elif self.conn.poll(0.02):
+            self.idle_timer = None # Reset idle timer
+            self.recv_buffer = self.conn.recv()
+            return self.recv_buffer.pop(0)
+        else:
+            if self.idle_timer is None: self.idle_timer = time.time()
+            idle_time = time.time() - self.idle_timer
+            if idle_time > 0.1:
+                # print(f'Warning: Node {self.address} has been idle for {idle_time:.2f} seconds')
+                self.conn.send((-1, self.address, self.idle_timer)) # Send request for help packet to get latest value from NAT
+                self.idle_timer = None
+            return -1
+
+    def execute(self) -> None:
+        """Executes the program"""
         instr_ptr = 0
         rel_base = 0
 
@@ -51,10 +83,10 @@ class IntcodeComputer:
                     self.stor(instr_ptr + 3, param_mode % 1000 // 100, rel_base, self.fetch(instr_ptr + 1, param_mode % 10, rel_base) * self.fetch(instr_ptr + 2, param_mode % 100 // 10, rel_base))
                     instr_ptr += 4
                 case 3:     # Input data
-                    self.stor(instr_ptr + 1, param_mode % 10, rel_base, conn.recv())
+                    self.stor(instr_ptr + 1, param_mode % 10, rel_base, self.recv())
                     instr_ptr += 2
                 case 4:     # Output data
-                    conn.send(self.fetch(instr_ptr + 1, param_mode % 10, rel_base))
+                    self.send(self.fetch(instr_ptr + 1, param_mode % 10, rel_base))
                     instr_ptr += 2
                 case 5:     # Jump if true
                     if self.fetch(instr_ptr + 1, param_mode % 10, rel_base) != 0: instr_ptr = self.fetch(instr_ptr + 2, param_mode % 100 // 10, rel_base)
@@ -88,14 +120,15 @@ class IntcodeComputer:
 #
 def computer_main(conn):
     """Main function for the process running the computer. Communicating with other processes using a Pipe object"""
-    with open('day 19/input.txt') as file:
+    with open('day 23/input.txt') as file:
         program_string = file.read().strip()
-    computer = IntcodeComputer(program_string)
+
+    # Initialize the computer by also assigning the address received as the first entry in the Pipe
+    computer = IntcodeComputer(program_string, conn, conn.recv())
     computer.expand_memory(100)
-    computer.backup()
-    while True:
-        computer.execute(conn)
-        computer.restore()
+
+    # Start the program
+    computer.execute()
     conn.close()
 
 #
@@ -103,71 +136,50 @@ def computer_main(conn):
 #
 if __name__ == "__main__":
     #
-    # Puzzle 1
+    # Puzzle 1 and 2
     #
-    conn, child_conn = Pipe()
-    p = Process(target=computer_main, args=(child_conn,))
-    p.start()
+    connections = []
+    processes = []
+    for i in range(50):
+        conn, child_conn = Pipe()
+        p = Process(target=computer_main, args=(child_conn,))
+        p.start()
+        conn.send(i)
+        processes.append(p)
+        connections.append(conn)
 
-    acc = 0
-    beam_view = ''
-    for y in range(50):
-        for x in range(50):
-            conn.send(x)
-            conn.send(y)
-            if conn.recv() == 1:
-                beam_view += '#'
-                acc += 1
-                puzzle2_start = (x, y)
-            else:
-                beam_view += '.'
-        beam_view += '\n'
+    # Initialize idle timers such that noone indicates idle
+    latest_nat_update = time.time()
+    idle_timers = [ latest_nat_update-1 ] * 50
 
-    print(beam_view)
+    print(f'Starting communication: ', end='')
 
-    print(f'Puzzle 1 solution is: {acc}')
+    # Keep track of latest NAT package(s)
+    nat_x = None
+    nat_y = None
+    nat_ys = []
+    while True:
+        for c in connections:
+            if c.poll():
+                dest, x, y = c.recv()
+                if 0 <= dest < 50:  # "Normal" packet
+                    connections[dest].send([x, y])
+                elif dest == 255:   # NAT packet
+                    if nat_y is None:
+                        print(f'\nPuzzle 1 solution is: {y}')
+                    nat_x = x
+                    nat_y = y
+                elif dest == -1:    # "Idle node" packet of structure (-1, node id, idle timer)
+                    idle_timers[x] = y
+                    if all(x > latest_nat_update for x in idle_timers):
+                        connections[0].send([nat_x, nat_y])
+                        latest_nat_update = time.time()
 
-    #
-    # Puzzle 2
-    #
-    x, y = puzzle2_start
-    diag_len = 0
-    start_points = []
-    while diag_len < 100:
-        while True: # Move down
-            y += 1
-            conn.send(x)
-            conn.send(y)
-            if conn.recv() == 0: break
+                        # Same Y value has been sent twice in a row (Puzzle 2 solution)
+                        nat_ys.append(nat_y)
+                        if len(nat_ys) >= 2 and nat_ys[-2] == nat_ys[-1]:
+                            print(f'Puzzle 2 solution is: {nat_y}')
+                            for p in processes: p.terminate()
+                            exit()
 
-        diag_len = 0
-        y -= 1
-        start_points.append((x, y))
-        while True: # Move diagonally up
-            x += 1
-            y -= 1
-            diag_len += 1
-            conn.send(x)
-            conn.send(y)
-            if conn.recv() == 0: break
-        x -= 1
-        y += 1
-
-    # Fine grained search between the last two diagonal searches
-    for x in range(start_points[-2][0], start_points[-1][0]):
-        for y in range(start_points[-2][1], start_points[-1][1]):
-            for i in range(0, 100, 99):
-                conn.send(x+i)
-                conn.send(y-i)
-                if conn.recv() == 0:
-                    break
-            else:
-                y -= 99
-                break
-        else: continue
-        break
-
-    print(f'Puzzle 2 solution is: {x*10000 + y} (x={x}, y={y})')
-
-    p.terminate()
-    p.join()
+    # p.join()

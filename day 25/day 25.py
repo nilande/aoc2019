@@ -1,3 +1,4 @@
+import re
 from multiprocessing import Process, Pipe
 
 #
@@ -83,91 +84,99 @@ class IntcodeComputer:
                     print(f'Error: Unknown opcode {op_code}... aborting.')
                     return
 
+class Inventory:
+    def __init__(self) -> None:
+        self.dictionary = {}
+        self.contents = 0
+
+    def __repr__(self) -> str:
+        return ''.join([k[0] for k, v in self.dictionary.items() if v & self.contents])
+
+    def process_line(self, line: str):
+        items = re.findall(r'You take the (.*)\.', line)
+        if len(items) == 1:
+            item = items[0]
+            if not item in self.dictionary:
+                self.dictionary[item] = 1 << len(self.dictionary)
+            self.contents |= self.dictionary[item]
+
+        items = re.findall(r'You drop the (.*)\.', line)
+        if len(items) == 1:
+            item = items[0]
+            self.contents &= ~self.dictionary[item]
+
+    def exchange_items(self, to_contents: int):
+        drops = [f'drop {k}' for k, v in self.dictionary.items() if v & self.contents & ~to_contents]
+        takes = [f'take {k}' for k, v in self.dictionary.items() if v & to_contents & ~self.contents]
+        return drops + takes
+
 #
 # Worker processes
 #
 def computer_main(conn):
     """Main function for the process running the computer. Communicating with other processes using a Pipe object"""
-    with open('day 19/input.txt') as file:
+    with open('day 25/input.txt') as file:
         program_string = file.read().strip()
     computer = IntcodeComputer(program_string)
-    computer.expand_memory(100)
-    computer.backup()
-    while True:
-        computer.execute(conn)
-        computer.restore()
+    computer.expand_memory(1000)
+    computer.execute(conn)
     conn.close()
+
+#
+# Helper function
+#
+def readline(conn: Pipe) -> tuple:
+    line = ''
+    while line[-1:] != '\n':
+        line += chr(conn.recv())
+    return line[:-1]
+
+def sendline(conn: Pipe, string: str) -> None:
+    for c in string+'\n': conn.send(ord(c))
 
 #
 # Main function
 #
 if __name__ == "__main__":
-    #
-    # Puzzle 1
-    #
     conn, child_conn = Pipe()
     p = Process(target=computer_main, args=(child_conn,))
     p.start()
 
-    acc = 0
-    beam_view = ''
-    for y in range(50):
-        for x in range(50):
-            conn.send(x)
-            conn.send(y)
-            if conn.recv() == 1:
-                beam_view += '#'
-                acc += 1
-                puzzle2_start = (x, y)
+    with open('day 25/commands.txt') as file:
+        commands = file.read().splitlines()
+
+    inventory = Inventory()
+
+    # Automate collection of items
+    while len(commands) > 0:
+        if not conn.poll(0.1):
+            command = commands.pop(0)
+            print(f'> {command}')
+            sendline(conn, command)
+        else:
+            line = readline(conn)
+            inventory.process_line(line)
+            print(line)
+
+    # Loop through all possible inventory combinations
+    i = 1
+    commands = inventory.exchange_items(i) + ['north']
+    while True:
+        if not p.is_alive(): break
+        elif not conn.poll(0.1):
+            if len(commands) > 0:
+                command = commands.pop(0)
+                print(f'> {command}')
+                sendline(conn, command)
+            elif i < 255:
+                i += 1
+                commands = inventory.exchange_items(i) + ['north']
             else:
-                beam_view += '.'
-        beam_view += '\n'
+                command = input(f'> ')
+                sendline(conn, command)
+        else:
+            line = readline(conn)
+            inventory.process_line(line)
+            print(line)
 
-    print(beam_view)
-
-    print(f'Puzzle 1 solution is: {acc}')
-
-    #
-    # Puzzle 2
-    #
-    x, y = puzzle2_start
-    diag_len = 0
-    start_points = []
-    while diag_len < 100:
-        while True: # Move down
-            y += 1
-            conn.send(x)
-            conn.send(y)
-            if conn.recv() == 0: break
-
-        diag_len = 0
-        y -= 1
-        start_points.append((x, y))
-        while True: # Move diagonally up
-            x += 1
-            y -= 1
-            diag_len += 1
-            conn.send(x)
-            conn.send(y)
-            if conn.recv() == 0: break
-        x -= 1
-        y += 1
-
-    # Fine grained search between the last two diagonal searches
-    for x in range(start_points[-2][0], start_points[-1][0]):
-        for y in range(start_points[-2][1], start_points[-1][1]):
-            for i in range(0, 100, 99):
-                conn.send(x+i)
-                conn.send(y-i)
-                if conn.recv() == 0:
-                    break
-            else:
-                y -= 99
-                break
-        else: continue
-        break
-
-    print(f'Puzzle 2 solution is: {x*10000 + y} (x={x}, y={y})')
-
-    p.terminate()
     p.join()
